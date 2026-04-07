@@ -1,11 +1,18 @@
-import React, { useState, useEffect } from "react";
-import { StyleSheet, View, Text } from "react-native";
+import React, { useState, useEffect, useRef } from "react";
+import { StyleSheet, View, Text, Dimensions } from "react-native";
 import { WebView } from "react-native-webview";
 import { Audio } from "expo-av";
+
+const { width } = Dimensions.get("window");
 
 export default function App() {
   const [note, setNote] = useState("--");
   const [hz, setHz] = useState("0");
+  const [color, setColor] = useState("#555");
+
+  const lastNoteRef = useRef("--");
+  const countRef = useRef(0);
+  const STABILITY_THRESHOLD = 3;
 
   useEffect(() => {
     (async () => {
@@ -19,8 +26,9 @@ export default function App() {
     })();
   }, []);
 
-  const getNoteFromHz = (freq: number) => {
-    if (freq < 30) return "--";
+  const processTuning = (freq: number) => {
+    if (freq < 40) return { name: "--", color: "#555" };
+
     const notes = [
       "DO",
       "DO#",
@@ -35,13 +43,30 @@ export default function App() {
       "LA#",
       "SI",
     ];
-    const midi = Math.round(12 * (Math.log(freq / 440) / Math.log(2)) + 69);
-    const noteName = notes[midi % 12];
-    const octave = Math.floor(midi / 12) - 1;
-    return `${noteName}${octave}`;
+
+    // Cálculo de la nota y la desviación (cents)
+    const midi = 12 * (Math.log(freq / 440) / Math.log(2)) + 69;
+    const midiRounded = Math.round(midi);
+    const cents = (midi - midiRounded) * 100; // Qué tan desafinado está (-50 a 50)
+
+    const noteName = notes[midiRounded % 12];
+    const octave = Math.floor(midiRounded / 12) - 1;
+
+    // Lógica de colores según afinación
+    let statusColor = "#FF3B30"; // Rojo (Muy desafinado)
+    if (Math.abs(cents) < 12) {
+      statusColor = "#00FF66"; // Verde (Afinado)
+    } else if (Math.abs(cents) < 30) {
+      statusColor = "#FFCC00"; // Amarillo/Naranja (Cerca)
+    }
+
+    return {
+      name: `${noteName}${octave}`,
+      color: statusColor,
+      cents: cents.toFixed(0),
+    };
   };
 
-  // Presta atención al cierre de este template string con ` abajo
   const htmlAnalyzer = `
     <html>
       <body style="background-color: black;">
@@ -52,19 +77,21 @@ export default function App() {
               const ctx = new (window.AudioContext || window.webkitAudioContext)();
               const src = ctx.createMediaStreamSource(stream);
               const ans = ctx.createAnalyser();
-              ans.fftSize = 2048;
+              ans.fftSize = 4096; // Mayor resolución
               src.connect(ans);
               const buf = new Float32Array(ans.fftSize);
+
               function detect() {
                 ans.getFloatTimeDomainData(buf);
                 let p = autoCorrelate(buf, ctx.sampleRate);
                 if (p !== -1) window.ReactNativeWebView.postMessage(p.toFixed(2));
                 requestAnimationFrame(detect);
               }
+
               function autoCorrelate(b, s) {
                 let L = b.length, r = 0;
                 for (let i=0; i<L; i++) r += b[i]*b[i];
-                if (Math.sqrt(r/L) < 0.015) return -1;
+                if (Math.sqrt(r/L) < 0.02) return -1;
                 let c = new Array(L).fill(0);
                 for (let i=0; i<L; i++) for (let j=0; j<L-i; j++) c[i] += b[j]*b[j+i];
                 let d = 0; while (c[d] > c[d+1]) d++;
@@ -84,18 +111,48 @@ export default function App() {
   const handleMessage = (e: any) => {
     const frequency = parseFloat(e.nativeEvent.data);
     if (!isNaN(frequency)) {
-      setHz(Math.round(frequency).toString());
-      setNote(getNoteFromHz(frequency));
+      const result = processTuning(frequency);
+
+      if (result.name === lastNoteRef.current) {
+        countRef.current += 1;
+      } else {
+        lastNoteRef.current = result.name;
+        countRef.current = 0;
+      }
+
+      if (countRef.current >= STABILITY_THRESHOLD) {
+        setHz(Math.round(frequency).toString());
+        setNote(result.name);
+        setColor(result.color);
+      }
     }
   };
 
   return (
     <View style={styles.container}>
-      <Text style={styles.label}>Nota detectada</Text>
-      <View style={styles.noteContainer}>
-        <Text style={styles.noteText}>{note}</Text>
+      <Text style={styles.mainTitle}>AFINADOR DE VOZ</Text>
+
+      <View style={[styles.circle, { borderColor: color, shadowColor: color }]}>
+        <Text
+          style={[styles.noteText, { color: color }]}
+          numberOfLines={1}
+          adjustsFontSizeToFit
+        >
+          {note}
+        </Text>
       </View>
-      <Text style={styles.hzText}>{hz} Hz</Text>
+
+      <View style={styles.infoBox}>
+        <Text style={styles.hzText}>{hz} Hz</Text>
+        <Text style={[styles.statusText, { color: color }]}>
+          {note === "--"
+            ? "SILENCIO"
+            : color === "#00FF66"
+              ? "AFINADO"
+              : "DESAFINADO"}
+        </Text>
+      </View>
+
       <View style={styles.hidden}>
         <WebView
           source={{ html: htmlAnalyzer, baseUrl: "https://localhost" }}
@@ -110,31 +167,51 @@ export default function App() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#000",
+    backgroundColor: "#050505",
     alignItems: "center",
     justifyContent: "center",
   },
-  label: {
-    color: "#555",
-    fontSize: 16,
+  mainTitle: {
+    color: "#ffffff",
+    fontSize: 18,
+    fontWeight: "bold",
+    letterSpacing: 5,
+    marginBottom: 50,
+    opacity: 0.7,
   },
-  noteContainer: {
-    marginVertical: 20,
-    padding: 30,
-    borderRadius: 20,
+  circle: {
+    width: width * 0.65, // Tamaño basado en el ancho de pantalla
+    height: width * 0.65,
+    borderRadius: (width * 0.65) / 2,
     backgroundColor: "#111",
-    borderWidth: 2,
-    borderColor: "#0f0",
+    borderWidth: 6,
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 20, // Espacio interno para que no toque bordes
+    elevation: 25,
+    shadowOpacity: 0.6,
+    shadowRadius: 20,
   },
   noteText: {
-    color: "#0f0",
-    fontSize: 70,
-    fontWeight: "bold",
+    fontSize: 80, // Tamaño máximo, bajará si el texto es largo
+    fontWeight: "900",
+    textAlign: "center",
+    width: "100%",
+  },
+  infoBox: {
+    marginTop: 50,
+    alignItems: "center",
   },
   hzText: {
     color: "#fff",
-    fontSize: 20,
-    opacity: 0.5,
+    fontSize: 28,
+    fontWeight: "200",
+  },
+  statusText: {
+    fontSize: 14,
+    marginTop: 10,
+    fontWeight: "bold",
+    letterSpacing: 2,
   },
   hidden: {
     position: "absolute",
